@@ -35,6 +35,7 @@ from __future__ import annotations
 import argparse
 import io
 import json
+import os
 import re
 import subprocess
 import tarfile
@@ -825,7 +826,7 @@ def main() -> None:
     parser.add_argument("--image", action="append", default=[], help="also scan this container image (repeatable)")
     parser.add_argument("--no-upload", action="store_true", help="only write files under reports/")
     parser.add_argument("--no-sonar", action="store_true")
-    parser.add_argument("--jobs", type=int, default=6, help="containers at once")
+    parser.add_argument("--jobs", type=int, default=os.cpu_count() or 6, help="containers at once (default: CPU count)")
     args = parser.parse_args()
 
     repo = args.repo.resolve()

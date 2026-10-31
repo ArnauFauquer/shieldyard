@@ -51,17 +51,19 @@ import argparse
 import csv
 import ipaddress
 import json
+import os
 import re
 import shlex
 import subprocess
 import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
 
 import report
 from common import DOJO_URL, ROOT, HttpError, load_env, request
-from scan import CACHES, PYTHON, Result, Tool, last_timings, run_parallel, slug, upload_dojo, upload_parallel
+from scan import CACHES, PYTHON, Result, Tool, last_timings, run, run_parallel, slug, upload_dojo, upload_parallel
 
 NUCLEI = "projectdiscovery/nuclei:v3.11.1"
 HTTPX = "projectdiscovery/httpx:v1.12.0"
@@ -176,7 +178,7 @@ def plan(target: str, live: list[dict], active: bool, out: Path, rate: int, auth
                     "ZAP_AUTH_HEADER_SITE": host} if auth else {}
         # -ni: no interactsh, so nothing about the target is sent to projectdiscovery's OAST servers.
         tools.append(Tool(f"nuclei {label}{as_user}", NUCLEI, ["-c", f"""
-            nuclei -u '{url}' {header}-duc -ni -silent -nc -jsonl -o /out/nuclei-{s}.jsonl -etags {excluded} -rl {rate} -c 10 -mhe 100 -timeout 15
+            nuclei -u '{url}' {header}-duc -ni -silent -nc -jsonl -o /out/nuclei-{s}.jsonl -etags {excluded} -rl {rate} -c 50 -mhe 100 -timeout 15
             [ -s /out/nuclei-{s}.jsonl ] || echo '[]' > /out/nuclei-{s}.jsonl  # nothing found still reimports, so fixed findings close
         """], f"nuclei-{s}.jsonl", "Nuclei Scan", entrypoint="sh", volumes=[NUCLEI_HOME], title=f"nuclei ({label}){as_user}"))
 
@@ -253,10 +255,10 @@ def plan(target: str, live: list[dict], active: bool, out: Path, rate: int, auth
     if crawled.exists() and crawled.stat().st_size:
         # Token templates read the body of whatever URL they get, so over the crawl they find
         # keys hardcoded in JavaScript bundles and pages, not just on the home page.
-        dast = (f"nuclei -l /out/katana-{slug(host)}.txt {header}-duc -ni -silent -nc -jsonl -o /tmp/dast.jsonl -dast -etags dos -rl {rate} -c 10 -mhe 100 -timeout 15\n"
+        dast = (f"nuclei -l /out/katana-{slug(host)}.txt {header}-duc -ni -silent -nc -jsonl -o /tmp/dast.jsonl -dast -etags dos -rl {rate} -c 50 -mhe 100 -timeout 15\n"
                 f"            cat /tmp/dast.jsonl >> /out/nuclei-crawl-{s}.jsonl 2>/dev/null") if active else ""
         tools.append(Tool(f"nuclei crawl {host}{as_user}", NUCLEI, ["-c", f"""
-            nuclei -l /out/katana-{slug(host)}.txt {header}-duc -ni -silent -nc -jsonl -o /out/nuclei-crawl-{s}.jsonl -tags token,tokens -etags dos -rl {rate} -c 10 -mhe 100 -timeout 15
+            nuclei -l /out/katana-{slug(host)}.txt {header}-duc -ni -silent -nc -jsonl -o /out/nuclei-crawl-{s}.jsonl -tags token,tokens -etags dos -rl {rate} -c 50 -mhe 100 -timeout 15
             {dast}
             [ -s /out/nuclei-crawl-{s}.jsonl ] || echo '[]' > /out/nuclei-crawl-{s}.jsonl  # nothing found still reimports, so fixed findings close
         """], f"nuclei-crawl-{s}.jsonl", "Nuclei Scan", entrypoint="sh", volumes=[NUCLEI_HOME],
@@ -595,9 +597,9 @@ def main() -> None:
     parser.add_argument("--active", action="store_true", help="active attacks: ZAP full scan, intrusive nuclei templates")
     parser.add_argument("--yes", action="store_true", help="don't ask before an --active scan")
     parser.add_argument("--no-upload", action="store_true", help="only write files under reports/")
-    parser.add_argument("--jobs", type=int, default=6, help="containers at once")
+    parser.add_argument("--jobs", type=int, default=os.cpu_count() or 6, help="containers at once (default: CPU count)")
     # Sites behind Cloudflare and the like start dropping a scanner well before 50 req/s.
-    parser.add_argument("--rate", type=int, default=10, help="requests per second per crawler/scanner (default 10)")
+    parser.add_argument("--rate", type=int, default=100, help="requests per second per crawler/scanner (default 100)")
     parser.add_argument("--auth", action="store_true",
                         help="scan logged in, sending WEB_AUTH_HEADER from .env (e.g. 'Cookie: session=...')")
     parser.add_argument("--auth-check", metavar="PATH",
@@ -630,8 +632,9 @@ def main() -> None:
     subprocess.run(["docker", "run", "--rm", "-v", NUCLEI_HOME, NUCLEI, "-ut", "-silent"], capture_output=True, check=False)
     jobs: list[tuple[Tool, str]] = []  # (tool, engagement)
     endpoints = []
-    for target in args.targets:
-        live = discover(target, args.subdomains, out, args.rate, auth)
+    with ThreadPoolExecutor(max_workers=len(args.targets)) as pool:  # targets are independent: discover them together
+        discovered = list(pool.map(lambda t: discover(t, args.subdomains, out, args.rate, auth), args.targets))
+    for target, live in zip(args.targets, discovered):
         if auth and args.auth_check and live:
             check_session(live[0]["url"], args.auth_check, auth)
         endpoints += [{"target": target, "url": r["url"], "status": r.get("status_code"), "title": r.get("title", ""),
