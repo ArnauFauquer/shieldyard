@@ -1,0 +1,7 @@
+.env
+reports/
+work/
+__pycache__/
+bootstrap.log
+.ruff_cache/
+*.pyc

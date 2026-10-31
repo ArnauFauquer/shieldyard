@@ -1,0 +1,198 @@
+# The platform the scanner reports to. Everything listens on 127.0.0.1 only.
+#
+#   python bootstrap.py      first run: secrets, start, admin passwords, API keys
+#   docker compose up -d     afterwards
+#
+#   DefectDojo        http://localhost:8180   findings from every scanner, deduplicated
+#   SonarQube         http://localhost:9100   code quality, cyclomatic/cognitive complexity
+#   DevLake           http://localhost:4000   DORA metrics (Grafana under /grafana)
+name: scaner
+
+x-dojo-env: &dojo-env
+  DD_DATABASE_URL: postgresql://defectdojo:${DD_DB_PASSWORD}@postgres:5432/defectdojo
+  DD_CELERY_BROKER_URL: redis://valkey:6379/0
+  DD_CACHE_URL: redis://valkey:6379/1
+  DD_SECRET_KEY: ${DD_SECRET_KEY}
+  DD_CREDENTIAL_AES_256_KEY: ${DD_CREDENTIAL_AES_256_KEY}
+  DD_DATABASE_READINESS_TIMEOUT: "60"
+
+x-dojo: &dojo
+  image: docker.io/defectdojo/defectdojo-django:3.4.304
+  restart: unless-stopped
+  volumes:
+    - ./defectdojo/extra_settings:/app/docker/extra_settings
+    - defectdojo-media:/app/media
+
+services:
+  # One Postgres for DefectDojo and SonarQube (see postgres/init.sh).
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      DD_DB_PASSWORD: ${DD_DB_PASSWORD}
+      SONAR_DB_PASSWORD: ${SONAR_DB_PASSWORD}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./postgres/init.sh:/docker-entrypoint-initdb.d/init.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # ── DefectDojo ──────────────────────────────────────────────────────────────
+  valkey:
+    image: valkey/valkey:9.1.2-alpine
+    restart: unless-stopped
+    volumes:
+      - valkey-data:/data
+
+  dojo-initializer:
+    <<: *dojo
+    restart: "no"
+    depends_on:
+      postgres: {condition: service_healthy}
+    entrypoint: ["/wait-for-it.sh", "postgres:5432", "--", "/entrypoint-initializer.sh"]
+    environment:
+      <<: *dojo-env
+      DD_ADMIN_USER: admin
+      DD_ADMIN_MAIL: admin@scaner.local
+      DD_ADMIN_PASSWORD: ${DD_ADMIN_PASSWORD}
+      DD_INITIALIZE: "true"
+
+  dojo-uwsgi:
+    <<: *dojo
+    depends_on:
+      dojo-initializer: {condition: service_completed_successfully}
+      valkey: {condition: service_started}
+    entrypoint: ["/wait-for-it.sh", "postgres:5432", "-t", "30", "--", "/entrypoint-uwsgi.sh"]
+    environment:
+      <<: *dojo-env
+      DD_DEBUG: "False"
+      DD_ALLOWED_HOSTS: "*"
+
+  dojo-celerybeat:
+    <<: *dojo
+    depends_on:
+      dojo-initializer: {condition: service_completed_successfully}
+      valkey: {condition: service_started}
+    entrypoint: ["/wait-for-it.sh", "postgres:5432", "-t", "30", "--", "/entrypoint-celery-beat.sh"]
+    environment: *dojo-env
+
+  dojo-celeryworker:
+    <<: *dojo
+    depends_on:
+      dojo-initializer: {condition: service_completed_successfully}
+      valkey: {condition: service_started}
+    entrypoint: ["/wait-for-it.sh", "postgres:5432", "-t", "30", "--", "/entrypoint-celery-worker.sh"]
+    environment: *dojo-env
+
+  dojo-nginx:
+    image: docker.io/defectdojo/defectdojo-nginx:3.4.304
+    restart: unless-stopped
+    depends_on: [dojo-uwsgi]
+    environment:
+      DD_UWSGI_HOST: dojo-uwsgi
+      DD_UWSGI_PORT: "3031"
+    volumes:
+      - defectdojo-media:/usr/share/nginx/html/media
+    ports:
+      - "127.0.0.1:8180:8080"
+
+  # ── SonarQube ───────────────────────────────────────────────────────────────
+  sonarqube:
+    image: sonarqube:26.10.0.133078-community
+    restart: unless-stopped
+    depends_on:
+      postgres: {condition: service_healthy}
+    environment:
+      SONAR_JDBC_URL: jdbc:postgresql://postgres:5432/sonar
+      SONAR_JDBC_USERNAME: sonar
+      SONAR_JDBC_PASSWORD: ${SONAR_DB_PASSWORD}
+      # Docker Desktop's VM keeps vm.max_map_count low; without mmap the
+      # embedded Elasticsearch starts anyway.
+      SONAR_SEARCH_JAVAADDITIONALOPTS: -Dnode.store.allow_mmap=false
+    volumes:
+      - sonar-data:/opt/sonarqube/data
+      - sonar-extensions:/opt/sonarqube/extensions
+    ports:
+      - "127.0.0.1:9100:9000"
+
+  # ── DevLake (DORA) ──────────────────────────────────────────────────────────
+  devlake-mysql:
+    image: mysql:8.4
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DEVLAKE_DB_PASSWORD}
+      MYSQL_DATABASE: lake
+      MYSQL_USER: merico
+      MYSQL_PASSWORD: ${DEVLAKE_DB_PASSWORD}
+      TZ: UTC
+    command: --character-set-server=utf8mb4 --collation-server=utf8mb4_bin --skip-log-bin
+    volumes:
+      - devlake-mysql:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  devlake:
+    image: apache/devlake:v1.0.2
+    restart: unless-stopped
+    depends_on:
+      devlake-mysql: {condition: service_healthy}
+    environment:
+      DB_URL: mysql://merico:${DEVLAKE_DB_PASSWORD}@devlake-mysql:3306/lake?charset=utf8mb4&parseTime=True&loc=UTC
+      ENCRYPTION_SECRET: ${DEVLAKE_ENCRYPTION_SECRET}
+      LOGGING_DIR: /app/logs
+      PORT: "8080"
+      MODE: release
+      TZ: UTC
+    volumes:
+      - devlake-logs:/app/logs
+    ports:
+      - "127.0.0.1:8183:8080"
+
+  devlake-grafana:
+    image: apache/devlake-dashboard:v1.0.2
+    restart: unless-stopped
+    depends_on:
+      devlake-mysql: {condition: service_healthy}
+    environment:
+      GF_SERVER_ROOT_URL: http://localhost:4000/grafana
+      # Dashboards readable without logging in (it only listens on localhost);
+      # editing needs admin with DEVLAKE_GRAFANA_PASSWORD (set by bootstrap.py).
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_SECURITY_ADMIN_PASSWORD: ${DEVLAKE_GRAFANA_PASSWORD}
+      MYSQL_URL: devlake-mysql:3306
+      MYSQL_DATABASE: lake
+      MYSQL_USER: merico
+      MYSQL_PASSWORD: ${DEVLAKE_DB_PASSWORD}
+      TZ: UTC
+    volumes:
+      - devlake-grafana:/var/lib/grafana
+
+  devlake-ui:
+    image: apache/devlake-config-ui:v1.0.2
+    restart: unless-stopped
+    depends_on: [devlake, devlake-grafana]
+    environment:
+      DEVLAKE_ENDPOINT: devlake:8080
+      GRAFANA_ENDPOINT: devlake-grafana:3000
+      TZ: UTC
+    ports:
+      - "127.0.0.1:4000:4000"
+
+volumes:
+  postgres-data:
+  valkey-data:
+  defectdojo-media:
+  sonar-data:
+  sonar-extensions:
+  devlake-mysql:
+  devlake-logs:
+  devlake-grafana:
