@@ -55,14 +55,13 @@ import re
 import shlex
 import subprocess
 import xml.etree.ElementTree as ET
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
 
 import report
 from common import DOJO_URL, ROOT, HttpError, load_env, request
-from scan import CACHES, PYTHON, Result, Tool, run, slug, upload_dojo
+from scan import CACHES, PYTHON, Result, Tool, last_timings, run_parallel, slug, upload_dojo, upload_parallel
 
 NUCLEI = "projectdiscovery/nuclei:v3.11.1"
 HTTPX = "projectdiscovery/httpx:v1.12.0"
@@ -655,13 +654,9 @@ def main() -> None:
 
     scans = [(t, e) for t, e in jobs if t.args]
     print(f"[*] running {len(scans)} scanners, {args.jobs} at a time")
-    results: list[tuple[Result, str]] = []
-    with ThreadPoolExecutor(max_workers=args.jobs) as pool:
-        futures = [(pool.submit(run, t, None, None, out), e) for t, e in scans]
-        for f, engagement in futures:
-            r = f.result()
-            results.append((r, engagement))
-            print(f"    {'ok ' if r.ok else 'ERR'} {r.tool.name:<40} {r.seconds:6.0f}s {r.note}", flush=True)
+    history = last_timings(ROOT / "reports" / slug(product) / "web")
+    ran = run_parallel([t for t, _ in scans], args.jobs, None, None, out, history, width=40)
+    results: list[tuple[Result, str]] = [(r, e) for r, (_, e) in zip(ran, scans)]
     results += [(Result(t, True, 0), e) for t, e in jobs if not t.args]  # httpx ran during discovery
     for r, _ in results:
         if r.ok and r.tool.convert:
@@ -671,9 +666,8 @@ def main() -> None:
     if upload:
         print("[*] uploading")
         product_type = "Repositories" if args.product else "Sites"
-        for r, engagement in results:
-            if not r.ok:
-                continue
+        def push(item: tuple[Result, str]) -> None:
+            r, engagement = item
             file = out / r.tool.output
             try:
                 if file.stat().st_size == 0:
@@ -684,6 +678,8 @@ def main() -> None:
             except HttpError as e:
                 r.dojo = f"upload failed: {e}"
             print(f"    {r.tool.name:<40} {r.dojo}", flush=True)
+
+        upload_parallel([x for x in results if x[0].ok], push)
 
     lines = [
         f"# {product} exposure scan", "", f"{', '.join(args.targets)}, {'active' if args.active else 'passive'}, "
