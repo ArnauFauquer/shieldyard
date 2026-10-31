@@ -503,14 +503,38 @@ def hygiene_tools(src: Path, files: list[str], images: list[str]) -> list[Tool]:
     licenses = "--scanners license --severity UNKNOWN,MEDIUM,HIGH,CRITICAL --format json"
     tools.append(Tool("trivy licenses", TRIVY, ["fs", "-q", "--cache-dir", "/cache", *licenses.split(),
                                                 "--output", "/out/licenses-source.json", "/src"],
-                      "licenses-source.json", "Trivy Scan", title="trivy licenses (source)"))
+                      "licenses-source.json", title="trivy licenses (source)", convert=license_findings))
     for image in images:
         s = slug(image)
         tools.append(Tool(f"trivy licenses {image}", TRIVY,
                           ["image", "-q", "--cache-dir", "/cache", *licenses.split(), "--pkg-types", "library",
                            "--output", f"/out/licenses-image-{s}.json", image],
-                          f"licenses-image-{s}.json", "Trivy Scan", docker_socket=True, title=f"trivy licenses ({image})"))
+                          f"licenses-image-{s}.json", docker_socket=True, title=f"trivy licenses ({image})",
+                          convert=license_findings))
     return tools
+
+
+def license_findings(path: Path) -> Path:
+    """trivy's license JSON as DefectDojo generic findings. A license is information, not a
+    vulnerability, so they are all Info whatever trivy's severity (which still picks what is listed)."""
+    findings = []
+    for result in json.loads(path.read_text(encoding="utf-8")).get("Results") or []:
+        for lic in result.get("Licenses") or []:
+            file = lic.get("FilePath") or result.get("Target", "")
+            pkg = lic.get("PkgName", "")
+            findings.append({
+                "title": f"{lic['Name']}: {pkg or file}" + (f" ({file})" if pkg and file else ""),
+                "severity": "Info",
+                "description": f"{lic.get('Category', 'unknown')} license `{lic['Name']}` (trivy: {lic.get('Severity', '')}) "
+                               f"in `{pkg or file}`.\n\n{lic.get('Link', '')}",
+                "file_path": file,
+                "static_finding": True,
+                "dynamic_finding": False,
+                "unique_id_from_tool": f"license:{file}:{pkg}:{lic['Name']}",
+            })
+    out = path.with_name(path.stem + "-findings.json")
+    out.write_text(json.dumps({"findings": findings}, indent=1), encoding="utf-8")
+    return out
 
 
 # Installed libraries: their docstrings are full of example credentials (user:pass@host).

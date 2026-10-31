@@ -55,7 +55,7 @@ python scan.py ../my-repo --no-upload      # files only, no platform needed
 | Malicious packages | GuardDog: downloads every dependency in `requirements.txt` / `package.json` and looks for typosquats, install scripts, obfuscation, exfiltration (threat rules only) | DefectDojo (SARIF) |
 | Repository protection | OpenSSF Scorecard: one finding per check under 10/10, at Scorecard's own risk level (needs `GITHUB_TOKEN`) | DefectDojo (generic findings) |
 | Dependency hygiene | deptry (Python), knip (npm): declared but unused, used but undeclared, unused files | DefectDojo (generic findings) |
-| Licenses | trivy: reciprocal, restricted, forbidden or unknown licenses; for images, libraries only | DefectDojo |
+| Licenses | trivy: reciprocal, restricted, forbidden or unknown licenses, all reported as Info (a license is information, not a vulnerability); for images, libraries only | DefectDojo |
 | SBOM | the CycloneDX files trivy writes, kept per scan | the report + `inventory.py` |
 | Complexity | lizard, functions with CCN > 15 (over 15 Low, over 25 Medium, over 50 High) | DefectDojo + `complexity.md` |
 | Tests | every pytest and vitest/jest suite, with line coverage and JUnit results | SonarQube + the report |
