@@ -90,7 +90,7 @@ def project(name: str, conn: int, github_id: int, days: int) -> int:
             raise
         existing = api("POST", "/projects", {
             "name": name,
-            "description": "DORA metrics, set up by scaner/devlake.py",
+            "description": "DORA metrics, set up by shieldyard/devlake.py",
             "enable": True,
             "metrics": [{"pluginName": "dora", "pluginOption": {}, "enable": True}],
         })

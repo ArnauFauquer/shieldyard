@@ -1,4 +1,4 @@
-# scaner
+# shieldyard
 
 A self-hosted, open-source take on Snyk / Aikido / SonarQube, plus DORA metrics.
 Scanners run in pinned containers; their results go to platforms that keep history,
@@ -147,7 +147,7 @@ been scanned yet and is at least 30 minutes old, so a deploy has rolled out (it 
 `GITHUB_TOKEN`). Schedule it hourly, for example as a Windows scheduled task:
 
 ```bash
-schtasks /Create /SC HOURLY /TN "scaner web" /TR "cmd /c cd /d C:\path\to\scaner && python web.py https://app.example.com --product my-repo --after-release my-org/my-repo >> reports\web-schedule.log 2>&1"
+schtasks /Create /SC HOURLY /TN "shieldyard web" /TR "cmd /c cd /d C:\path\to\shieldyard && python web.py https://app.example.com --product my-repo --after-release my-org/my-repo >> reports\web-schedule.log 2>&1"
 ```
 
 The last tag scanned is in `reports/<product>/web/last-release.txt`; delete it to scan

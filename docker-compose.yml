@@ -6,6 +6,7 @@
 #   DefectDojo        http://localhost:8180   findings from every scanner, deduplicated
 #   SonarQube         http://localhost:9100   code quality, cyclomatic/cognitive complexity
 #   DevLake           http://localhost:4000   DORA metrics (Grafana under /grafana)
+# Kept as `scaner`, the project's old name: renaming it would orphan the existing volumes and network.
 name: scaner
 
 x-dojo-env: &dojo-env

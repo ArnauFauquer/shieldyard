@@ -99,9 +99,9 @@ def theharvester_findings(path: Path, domain: str) -> Path:
 def hibp_findings(domain: str, key: str, out: Path) -> Path:
     """HIBP's breached addresses at a domain as DefectDojo generic findings. An address
     whose breach included passwords is High: that password may still be in use."""
-    headers = {"hibp-api-key": key, "user-agent": "scaner-osint"}
+    headers = {"hibp-api-key": key, "user-agent": "shieldyard-osint"}
     breached = request("GET", f"{HIBP}/breacheddomain/{domain}", headers=headers) or {}
-    catalog = {b["Name"]: b for b in request("GET", f"{HIBP}/breaches", headers={"user-agent": "scaner-osint"})}
+    catalog = {b["Name"]: b for b in request("GET", f"{HIBP}/breaches", headers={"user-agent": "shieldyard-osint"})}
     findings = []
     for alias, names in sorted(breached.items()):
         breaches = [catalog.get(n, {"Name": n, "Title": n, "BreachDate": "?", "DataClasses": []}) for n in names]
