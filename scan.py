@@ -35,12 +35,13 @@ from __future__ import annotations
 import argparse
 import io
 import json
+import os
 import re
 import subprocess
 import tarfile
 import time
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -777,6 +778,47 @@ def upload_dojo(env, file: Path, scan_type: str, title: str, product: str, engag
             f"(+{count(delta.get('created'))} new, -{count(delta.get('closed'))} closed)")
 
 
+def prepull(images: set[str], jobs: int) -> None:
+    """Pulls missing images up front, in parallel, so downloads don't count as scan time."""
+    def pull(image: str) -> None:
+        if subprocess.run(["docker", "image", "inspect", image], capture_output=True, check=False).returncode:
+            subprocess.run(["docker", "pull", "-q", image], capture_output=True, check=False)
+    with ThreadPoolExecutor(max_workers=jobs) as pool:
+        list(pool.map(pull, sorted(images)))
+
+
+def last_timings(product_dir: Path) -> dict[str, float]:
+    """Seconds per tool from the newest earlier run, to start the slowest ones first."""
+    for run_dir in sorted((p for p in product_dir.glob("*/run.json")), reverse=True):
+        try:
+            return {t["name"]: t["seconds"] for t in json.loads(run_dir.read_text(encoding="utf-8"))["tools"]}
+        except (OSError, ValueError, KeyError):
+            continue
+    return {}
+
+
+def run_parallel(tools: list[Tool], jobs: int, src: Path | None, repo: Path | None, out: Path,
+                 history: dict[str, float], width: int = 34) -> list[Result]:
+    """Runs the tools slowest-first, prints each as it finishes, returns results in the input order."""
+    prepull({t.image for t in tools}, jobs)
+    results: dict[int, Result] = {}
+    with ThreadPoolExecutor(max_workers=jobs) as pool:
+        futures = {pool.submit(run, tools[i], src, repo, out): i
+                   for i in sorted(range(len(tools)), key=lambda i: -history.get(tools[i].name, 0))}
+        for f in as_completed(futures):
+            r = results[futures[f]] = f.result()
+            print(f"    {'ok ' if r.ok else 'ERR'} {r.tool.name:<{width}} {r.seconds:6.0f}s {r.note}", flush=True)
+    return [results[i] for i in range(len(tools))]
+
+
+def upload_parallel(items: list, upload: Callable[[object], None], jobs: int = 4) -> None:
+    """The first upload runs alone (it may create the product/engagement), the rest in parallel."""
+    if items:
+        upload(items[0])
+    with ThreadPoolExecutor(max_workers=jobs) as pool:
+        list(pool.map(upload, items[1:]))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("repo", type=Path)
@@ -784,7 +826,7 @@ def main() -> None:
     parser.add_argument("--image", action="append", default=[], help="also scan this container image (repeatable)")
     parser.add_argument("--no-upload", action="store_true", help="only write files under reports/")
     parser.add_argument("--no-sonar", action="store_true")
-    parser.add_argument("--jobs", type=int, default=6, help="containers at once")
+    parser.add_argument("--jobs", type=int, default=os.cpu_count() or 6, help="containers at once (default: CPU count)")
     args = parser.parse_args()
 
     repo = args.repo.resolve()
@@ -812,18 +854,11 @@ def main() -> None:
     sonar = upload and not args.no_sonar and bool(env.get("SONAR_TOKEN"))
     print(f"[*] running {len(tools) + sonar} scanners, {args.jobs} at a time; output in {out}")
 
-    def report_line(r: Result) -> None:
-        print(f"    {'ok ' if r.ok else 'ERR'} {r.tool.name:<34} {r.seconds:6.0f}s {r.note}", flush=True)
-
-    with ThreadPoolExecutor(max_workers=args.jobs) as pool:
-        futures = [pool.submit(run, t, src, repo, out) for t in tools]
-        results = []
-        for f in futures:
-            results.append(f.result())
-            report_line(results[-1])
+    history = last_timings(ROOT / "reports" / slug(product))
+    results = run_parallel(tools, args.jobs, src, repo, out, history)
     if sonar:  # last, so it reads the coverage the test suites just wrote
         results.append(run(sonar_tool(product, commit[:12], env, out), src, repo, out))
-        report_line(results[-1])
+        print(f"    {'ok ' if results[-1].ok else 'ERR'} {results[-1].tool.name:<34} {results[-1].seconds:6.0f}s {results[-1].note}", flush=True)
 
     for r in results:
         if r.ok and r.tool.convert:
@@ -838,9 +873,7 @@ def main() -> None:
 
     if upload:
         print("[*] uploading")
-        for r in results:
-            if not r.ok:
-                continue
+        def push(r: Result) -> None:
             file = out / r.tool.output
             try:
                 if r.tool.output and file.stat().st_size == 0:
@@ -858,6 +891,8 @@ def main() -> None:
             except HttpError as e:
                 r.dojo = f"upload failed: {e}"
             print(f"    {r.tool.name:<34} {r.dojo}", flush=True)
+
+        upload_parallel([r for r in results if r.ok], push)
 
     lines = [
         f"# {product} scan", "", f"{branch} @ `{commit[:12]}`, {datetime.now():%Y-%m-%d %H:%M}", "",

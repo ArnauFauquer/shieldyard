@@ -51,6 +51,7 @@ import argparse
 import csv
 import ipaddress
 import json
+import os
 import re
 import shlex
 import subprocess
@@ -62,7 +63,7 @@ from urllib.parse import urlsplit
 
 import report
 from common import DOJO_URL, ROOT, HttpError, load_env, request
-from scan import CACHES, PYTHON, Result, Tool, run, slug, upload_dojo
+from scan import CACHES, PYTHON, Result, Tool, last_timings, run, run_parallel, slug, upload_dojo, upload_parallel
 
 NUCLEI = "projectdiscovery/nuclei:v3.11.1"
 HTTPX = "projectdiscovery/httpx:v1.12.0"
@@ -177,7 +178,7 @@ def plan(target: str, live: list[dict], active: bool, out: Path, rate: int, auth
                     "ZAP_AUTH_HEADER_SITE": host} if auth else {}
         # -ni: no interactsh, so nothing about the target is sent to projectdiscovery's OAST servers.
         tools.append(Tool(f"nuclei {label}{as_user}", NUCLEI, ["-c", f"""
-            nuclei -u '{url}' {header}-duc -ni -silent -nc -jsonl -o /out/nuclei-{s}.jsonl -etags {excluded} -rl {rate} -c 10 -mhe 100 -timeout 15
+            nuclei -u '{url}' {header}-duc -ni -silent -nc -jsonl -o /out/nuclei-{s}.jsonl -etags {excluded} -rl {rate} -c 50 -mhe 100 -timeout 15
             [ -s /out/nuclei-{s}.jsonl ] || echo '[]' > /out/nuclei-{s}.jsonl  # nothing found still reimports, so fixed findings close
         """], f"nuclei-{s}.jsonl", "Nuclei Scan", entrypoint="sh", volumes=[NUCLEI_HOME], title=f"nuclei ({label}){as_user}"))
 
@@ -254,10 +255,10 @@ def plan(target: str, live: list[dict], active: bool, out: Path, rate: int, auth
     if crawled.exists() and crawled.stat().st_size:
         # Token templates read the body of whatever URL they get, so over the crawl they find
         # keys hardcoded in JavaScript bundles and pages, not just on the home page.
-        dast = (f"nuclei -l /out/katana-{slug(host)}.txt {header}-duc -ni -silent -nc -jsonl -o /tmp/dast.jsonl -dast -etags dos -rl {rate} -c 10 -mhe 100 -timeout 15\n"
+        dast = (f"nuclei -l /out/katana-{slug(host)}.txt {header}-duc -ni -silent -nc -jsonl -o /tmp/dast.jsonl -dast -etags dos -rl {rate} -c 50 -mhe 100 -timeout 15\n"
                 f"            cat /tmp/dast.jsonl >> /out/nuclei-crawl-{s}.jsonl 2>/dev/null") if active else ""
         tools.append(Tool(f"nuclei crawl {host}{as_user}", NUCLEI, ["-c", f"""
-            nuclei -l /out/katana-{slug(host)}.txt {header}-duc -ni -silent -nc -jsonl -o /out/nuclei-crawl-{s}.jsonl -tags token,tokens -etags dos -rl {rate} -c 10 -mhe 100 -timeout 15
+            nuclei -l /out/katana-{slug(host)}.txt {header}-duc -ni -silent -nc -jsonl -o /out/nuclei-crawl-{s}.jsonl -tags token,tokens -etags dos -rl {rate} -c 50 -mhe 100 -timeout 15
             {dast}
             [ -s /out/nuclei-crawl-{s}.jsonl ] || echo '[]' > /out/nuclei-crawl-{s}.jsonl  # nothing found still reimports, so fixed findings close
         """], f"nuclei-crawl-{s}.jsonl", "Nuclei Scan", entrypoint="sh", volumes=[NUCLEI_HOME],
@@ -596,9 +597,9 @@ def main() -> None:
     parser.add_argument("--active", action="store_true", help="active attacks: ZAP full scan, intrusive nuclei templates")
     parser.add_argument("--yes", action="store_true", help="don't ask before an --active scan")
     parser.add_argument("--no-upload", action="store_true", help="only write files under reports/")
-    parser.add_argument("--jobs", type=int, default=6, help="containers at once")
+    parser.add_argument("--jobs", type=int, default=os.cpu_count() or 6, help="containers at once (default: CPU count)")
     # Sites behind Cloudflare and the like start dropping a scanner well before 50 req/s.
-    parser.add_argument("--rate", type=int, default=10, help="requests per second per crawler/scanner (default 10)")
+    parser.add_argument("--rate", type=int, default=100, help="requests per second per crawler/scanner (default 100)")
     parser.add_argument("--auth", action="store_true",
                         help="scan logged in, sending WEB_AUTH_HEADER from .env (e.g. 'Cookie: session=...')")
     parser.add_argument("--auth-check", metavar="PATH",
@@ -631,8 +632,9 @@ def main() -> None:
     subprocess.run(["docker", "run", "--rm", "-v", NUCLEI_HOME, NUCLEI, "-ut", "-silent"], capture_output=True, check=False)
     jobs: list[tuple[Tool, str]] = []  # (tool, engagement)
     endpoints = []
-    for target in args.targets:
-        live = discover(target, args.subdomains, out, args.rate, auth)
+    with ThreadPoolExecutor(max_workers=len(args.targets)) as pool:  # targets are independent: discover them together
+        discovered = list(pool.map(lambda t: discover(t, args.subdomains, out, args.rate, auth), args.targets))
+    for target, live in zip(args.targets, discovered):
         if auth and args.auth_check and live:
             check_session(live[0]["url"], args.auth_check, auth)
         endpoints += [{"target": target, "url": r["url"], "status": r.get("status_code"), "title": r.get("title", ""),
@@ -655,13 +657,9 @@ def main() -> None:
 
     scans = [(t, e) for t, e in jobs if t.args]
     print(f"[*] running {len(scans)} scanners, {args.jobs} at a time")
-    results: list[tuple[Result, str]] = []
-    with ThreadPoolExecutor(max_workers=args.jobs) as pool:
-        futures = [(pool.submit(run, t, None, None, out), e) for t, e in scans]
-        for f, engagement in futures:
-            r = f.result()
-            results.append((r, engagement))
-            print(f"    {'ok ' if r.ok else 'ERR'} {r.tool.name:<40} {r.seconds:6.0f}s {r.note}", flush=True)
+    history = last_timings(ROOT / "reports" / slug(product) / "web")
+    ran = run_parallel([t for t, _ in scans], args.jobs, None, None, out, history, width=40)
+    results: list[tuple[Result, str]] = [(r, e) for r, (_, e) in zip(ran, scans)]
     results += [(Result(t, True, 0), e) for t, e in jobs if not t.args]  # httpx ran during discovery
     for r, _ in results:
         if r.ok and r.tool.convert:
@@ -671,9 +669,8 @@ def main() -> None:
     if upload:
         print("[*] uploading")
         product_type = "Repositories" if args.product else "Sites"
-        for r, engagement in results:
-            if not r.ok:
-                continue
+        def push(item: tuple[Result, str]) -> None:
+            r, engagement = item
             file = out / r.tool.output
             try:
                 if file.stat().st_size == 0:
@@ -684,6 +681,8 @@ def main() -> None:
             except HttpError as e:
                 r.dojo = f"upload failed: {e}"
             print(f"    {r.tool.name:<40} {r.dojo}", flush=True)
+
+        upload_parallel([x for x in results if x[0].ok], push)
 
     lines = [
         f"# {product} exposure scan", "", f"{', '.join(args.targets)}, {'active' if args.active else 'passive'}, "
