@@ -258,3 +258,7 @@ postgres/init.sh     one database + owner per tool
 - Deploy the platform to a cluster (all three tools have Helm charts).
 - Incidents straight from Grafana alerts: DevLake's webhook plugin accepts them, so
   CFR/MTTR don't depend on someone labelling an issue.
+
+## License
+
+[MIT No Attribution](LICENSE), the same as Realm-Keeper. The scanners it runs keep their own licenses (for example Shannon is AGPL-3.0); they run as separate containers and are not part of this repository.
