@@ -18,7 +18,7 @@ x-dojo-env: &dojo-env
   DD_DATABASE_READINESS_TIMEOUT: "60"
 
 x-dojo: &dojo
-  image: docker.io/defectdojo/defectdojo-django:3.4.304
+  image: docker.io/defectdojo/defectdojo-django:3.5.0
   restart: unless-stopped
   volumes:
     - ./defectdojo/extra_settings:/app/docker/extra_settings
