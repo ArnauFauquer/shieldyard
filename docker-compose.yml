@@ -27,7 +27,7 @@ x-dojo: &dojo
 services:
   # One Postgres for DefectDojo and SonarQube (see postgres/init.sh).
   postgres:
-    image: postgres:17-alpine
+    image: postgres:18-alpine
     restart: unless-stopped
     environment:
       POSTGRES_USER: postgres
