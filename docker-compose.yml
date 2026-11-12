@@ -91,7 +91,7 @@ services:
     environment: *dojo-env
 
   dojo-nginx:
-    image: docker.io/defectdojo/defectdojo-nginx:3.4.304
+    image: docker.io/defectdojo/defectdojo-nginx:3.5.102
     restart: unless-stopped
     depends_on: [dojo-uwsgi]
     environment:
