@@ -45,7 +45,7 @@ services:
 
   # ── DefectDojo ──────────────────────────────────────────────────────────────
   valkey:
-    image: valkey/valkey:9.1.2-alpine
+    image: valkey/valkey:9.1.3-alpine
     restart: unless-stopped
     volumes:
       - valkey-data:/data
