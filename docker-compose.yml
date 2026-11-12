@@ -104,7 +104,7 @@ services:
 
   # ── SonarQube ───────────────────────────────────────────────────────────────
   sonarqube:
-    image: sonarqube:26.10.0.133078-community
+    image: sonarqube:26.11.0.134175-community
     restart: unless-stopped
     depends_on:
       postgres: {condition: service_healthy}
